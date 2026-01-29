@@ -851,7 +851,7 @@ namespace audiofft
         ippsFFTInit_R_32f(
           &_fftSpec,
           _powerOf2,
-          IPP_FFT_NODIV_BY_ANY, 
+          IPP_FFT_NODIV_BY_ANY,
           ippAlgHintAccurate,
           _fftSpecBuf,
           fftInitBuf
@@ -1189,12 +1189,6 @@ namespace audiofft
   void AudioFFT::ifft(float* data, const float* re, const float* im)
   {
     _impl->ifft(data, re, im);
-  }
-
-
-  size_t AudioFFT::ComplexSize(size_t size)
-  {
-    return (size / 2) + 1;
   }
 
 } // End of namespace

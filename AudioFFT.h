@@ -150,12 +150,13 @@ namespace audiofft
      * @param size The size of the real data
      * @return The size of the real/imaginary complex arrays
      */
-    static size_t ComplexSize(size_t size);
+    static constexpr size_t ComplexSize(size_t size) noexcept {
+        return size / 2 + 1;
+    }
 
   private:
     std::unique_ptr<detail::AudioFFTImpl> _impl;
   };
-
 
   /**
    * @deprecated
