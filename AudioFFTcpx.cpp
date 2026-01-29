@@ -26,8 +26,6 @@
 #include <cmath>
 #include <cstring>
 
-#define AUDIOFFT_INTEL_IPP
-
 #if defined(AUDIOFFT_INTEL_IPP)
 #define AUDIOFFT_INTEL_IPP_USED
 #include <ipp.h>
@@ -894,11 +892,9 @@ typedef IntelIppFFT AudioFFTImplementation;
  * @class AppleAccelerateFFT
  * @brief FFT implementation using the Apple Accelerate framework internally
  */
-class AppleAccelerateFFT : public detail::AudioFFTImpl {
+class AppleAccelerateFFT : public detail::AudioFFTcpxImpl {
 public:
-  AppleAccelerateFFT()
-      : detail::AudioFFTImpl(), _size(0), _powerOf2(0), _fftSetup(0), _re(),
-        _im() {}
+  AppleAccelerateFFT() : _size(0), _powerOf2(0), _fftSetup(nullptr) {}
 
   AppleAccelerateFFT(const AppleAccelerateFFT &) = delete;
   AppleAccelerateFFT &operator=(const AppleAccelerateFFT &) = delete;
@@ -908,53 +904,68 @@ public:
   virtual void init(size_t size) override {
     if (_fftSetup) {
       vDSP_destroy_fftsetup(_fftSetup);
-      _size = 0;
-      _powerOf2 = 0;
-      _fftSetup = 0;
-      _re.clear();
-      _im.clear();
+      _fftSetup = nullptr;
     }
 
     if (size > 0) {
       _size = size;
+      // 使用之前讨论过的 std::countr_zero 的 C++11 兼容逻辑来计算 log2
       _powerOf2 = 0;
-      while ((1 << _powerOf2) < _size) {
+      while ((1ULL << _powerOf2) < _size) {
         ++_powerOf2;
       }
+
+      // 注意：复数 FFT 仍然使用 FFT_RADIX2
       _fftSetup = vDSP_create_fftsetup(_powerOf2, FFT_RADIX2);
-      _re.resize(_size / 2);
-      _im.resize(_size / 2);
+
+      // 为 Split Complex 格式预留足够的空间
+      _re.assign(_size, 0.0f);
+      _im.assign(_size, 0.0f);
     }
   }
 
-  virtual void fft(const float *data, float *re, float *im) override {
-    const size_t size2 = _size / 2;
-    DSPSplitComplex splitComplex;
-    splitComplex.realp = re;
-    splitComplex.imagp = im;
-    vDSP_ctoz(reinterpret_cast<const COMPLEX *>(data), 2, &splitComplex, 1,
-              size2);
-    vDSP_fft_zrip(_fftSetup, &splitComplex, 1, _powerOf2, FFT_FORWARD);
-    const float factor = 0.5f;
-    vDSP_vsmul(re, 1, &factor, re, 1, size2);
-    vDSP_vsmul(im, 1, &factor, im, 1, size2);
-    re[size2] = im[0];
-    im[0] = 0.0f;
-    im[size2] = 0.0f;
-  }
+  /**
+   * 复数正向 FFT
+   * in_re/in_im -> out_re/out_im
+   */
+  virtual void fft(const float *in_re, const float *in_im, float *out_re,
+                   float *out_im) override {
+    // vDSP 的复数 FFT 要求输入在 DSPSplitComplex 结构中
+    // 我们将输入拷贝到内部缓冲区，避免破坏原始输入（如果是 const）
+    std::copy_n(in_re, _size, _re.begin());
+    std::copy_n(in_im, _size, _im.begin());
 
-  virtual void ifft(float *data, const float *re, const float *im) override {
-    const size_t size2 = _size / 2;
-    ::memcpy(_re.data(), re, size2 * sizeof(float));
-    ::memcpy(_im.data(), im, size2 * sizeof(float));
-    _im[0] = re[size2];
     DSPSplitComplex splitComplex;
     splitComplex.realp = _re.data();
     splitComplex.imagp = _im.data();
-    vDSP_fft_zrip(_fftSetup, &splitComplex, 1, _powerOf2, FFT_INVERSE);
-    vDSP_ztoc(&splitComplex, 1, reinterpret_cast<COMPLEX *>(data), 2, size2);
+
+    // 核心：使用 z_i_p (Complex In-place)，而不是 z_r_i_p
+    vDSP_fft_zip(_fftSetup, &splitComplex, 1, _powerOf2, FFT_FORWARD);
+
+    // 拷贝回输出
+    std::copy_n(_re.begin(), _size, out_re);
+    std::copy_n(_im.begin(), _size, out_im);
+  }
+
+  /**
+   * 复数反向 FFT (IFFT)
+   */
+  virtual void ifft(float *out_re, float *out_im, const float *in_re,
+                    const float *in_im) override {
+    std::copy_n(in_re, _size, _re.begin());
+    std::copy_n(in_im, _size, _im.begin());
+
+    DSPSplitComplex splitComplex;
+    splitComplex.realp = _re.data();
+    splitComplex.imagp = _im.data();
+
+    // 核心：FFT_INVERSE
+    vDSP_fft_zip(_fftSetup, &splitComplex, 1, _powerOf2, FFT_INVERSE);
+
+    // vDSP 并不在内部除以 N，所以需要手动归一化
     const float factor = 1.0f / static_cast<float>(_size);
-    vDSP_vsmul(data, 1, &factor, data, 1, _size);
+    vDSP_vsmul(_re.data(), 1, &factor, out_re, 1, _size);
+    vDSP_vsmul(_im.data(), 1, &factor, out_im, 1, _size);
   }
 
 private:
@@ -984,11 +995,11 @@ typedef AppleAccelerateFFT AudioFFTImplementation;
  * @class FFTW3FFT
  * @brief FFT implementation using FFTW3 internally (see fftw.org)
  */
-class FFTW3FFT : public detail::AudioFFTImpl {
+class FFTW3FFT : public detail::AudioFFTcpxImpl {
 public:
   FFTW3FFT()
-      : detail::AudioFFTImpl(), _size(0), _complexSize(0), _planForward(0),
-        _planBackward(0), _data(0), _re(0), _im(0) {}
+      : detail::AudioFFTcpxImpl(), _size(0), _planForward(0), _planBackward(0),
+        _re(0), _im(0) {}
 
   FFTW3FFT(const FFTW3FFT &) = delete;
   FFTW3FFT &operator=(const FFTW3FFT &) = delete;
@@ -1002,67 +1013,73 @@ public:
         fftwf_destroy_plan(_planBackward);
         _planForward = 0;
         _planBackward = 0;
-        _size = 0;
-        _complexSize = 0;
 
-        if (_data) {
-          fftwf_free(_data);
-          _data = 0;
-        }
-
-        if (_re) {
+        if (_re)
           fftwf_free(_re);
-          _re = 0;
-        }
-
-        if (_im) {
+        if (_im)
           fftwf_free(_im);
-          _im = 0;
-        }
+        _re = 0;
+        _im = 0;
       }
 
-      if (size > 0) {
-        _size = size;
-        _complexSize = AudioFFT::ComplexSize(_size);
-        const size_t complexSize = AudioFFT::ComplexSize(_size);
-        _data = reinterpret_cast<float *>(fftwf_malloc(_size * sizeof(float)));
-        _re = reinterpret_cast<float *>(
-            fftwf_malloc(complexSize * sizeof(float)));
-        _im = reinterpret_cast<float *>(
-            fftwf_malloc(complexSize * sizeof(float)));
+      _size = size;
+
+      if (_size > 0) {
+        // 分配对齐的内存，FFTW 在 SIMD 上的表现依赖于此
+        _re = reinterpret_cast<float *>(fftwf_malloc(_size * sizeof(float)));
+        _im = reinterpret_cast<float *>(fftwf_malloc(_size * sizeof(float)));
 
         fftw_iodim dim;
-        dim.n = static_cast<int>(size);
-        dim.is = 1;
-        dim.os = 1;
-        _planForward = fftwf_plan_guru_split_dft_r2c(1, &dim, 0, 0, _data, _re,
-                                                     _im, FFTW_MEASURE);
-        _planBackward = fftwf_plan_guru_split_dft_c2r(1, &dim, 0, 0, _re, _im,
-                                                      _data, FFTW_MEASURE);
+        dim.n = static_cast<int>(_size);
+        dim.is = 1; // 输入步长
+        dim.os = 1; // 输出步长
+
+        // 核心：使用 guru_split_dft 实现复数到复数
+        // 参数含义：rank, dims, howmany_rank, howmany_dims, in_re, in_im,
+        // out_re, out_im
+        _planForward = fftwf_plan_guru_split_dft(1, &dim, 0, nullptr, _re, _im,
+                                                 _re, _im, FFTW_MEASURE);
+
+        // IFFT 只需要将 plan 的方向改为逆向即可，接口是一样的
+        _planBackward = fftwf_plan_guru_split_dft(1, &dim, 0, nullptr, _re, _im,
+                                                  _re, _im, FFTW_MEASURE);
       }
     }
   }
 
-  virtual void fft(const float *data, float *re, float *im) override {
-    ::memcpy(_data, data, _size * sizeof(float));
-    fftwf_execute_split_dft_r2c(_planForward, _data, _re, _im);
-    ::memcpy(re, _re, _complexSize * sizeof(float));
-    ::memcpy(im, _im, _complexSize * sizeof(float));
+  virtual void fft(const float *in_re, const float *in_im, float *out_re,
+                   float *out_im) override {
+    // 将输入拷贝到内部对齐缓冲区
+    ::memcpy(_re, in_re, _size * sizeof(float));
+    ::memcpy(_im, in_im, _size * sizeof(float));
+
+    // 执行 Split DFT
+    fftwf_execute_split_dft(_planForward, _re, _im, _re, _im);
+
+    // 拷贝回输出
+    ::memcpy(out_re, _re, _size * sizeof(float));
+    ::memcpy(out_im, _im, _size * sizeof(float));
   }
 
-  virtual void ifft(float *data, const float *re, const float *im) override {
-    ::memcpy(_re, re, _complexSize * sizeof(float));
-    ::memcpy(_im, im, _complexSize * sizeof(float));
-    fftwf_execute_split_dft_c2r(_planBackward, _re, _im, _data);
-    detail::ScaleBuffer(data, _data, 1.0f / static_cast<float>(_size), _size);
+  virtual void ifft(float *out_re, float *out_im, const float *in_re,
+                    const float *in_im) override {
+    ::memcpy(_re, in_re, _size * sizeof(float));
+    ::memcpy(_im, in_im, _size * sizeof(float));
+
+    fftwf_execute_split_dft(_planBackward, _re, _im, _re, _im);
+
+    // FFTW3 IFFT 需要手动缩放归一化 (Scale)
+    const float factor = 1.0f / static_cast<float>(_size);
+    for (size_t i = 0; i < _size; ++i) {
+      out_re[i] = _re[i] * factor;
+      out_im[i] = _im[i] * factor;
+    }
   }
 
 private:
   size_t _size;
-  size_t _complexSize;
   fftwf_plan _planForward;
   fftwf_plan _planBackward;
-  float *_data;
   float *_re;
   float *_im;
 };
