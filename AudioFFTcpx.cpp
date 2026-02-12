@@ -886,8 +886,6 @@ typedef IntelIppFFT AudioFFTImplementation;
 
 #ifdef AUDIOFFT_APPLE_ACCELERATE_USED
 
-#error "not implemened"
-
 /**
  * @internal
  * @class AppleAccelerateFFT
@@ -988,8 +986,6 @@ typedef AppleAccelerateFFT AudioFFTImplementation;
 // ================================================================
 
 #ifdef AUDIOFFT_FFTW3_USED
-
-#error "not implemened"
 
 /**
  * @internal
