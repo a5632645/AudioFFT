@@ -25,6 +25,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <bit>
 
 #if defined(AUDIOFFT_INTEL_IPP)
 #define AUDIOFFT_INTEL_IPP_USED
